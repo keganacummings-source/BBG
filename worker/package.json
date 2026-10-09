@@ -1,0 +1,13 @@
+{
+  "name": "babygirl-dream-api",
+  "version": "2.4.0",
+  "description": "DreamAPI Worker for BabyGirl VST3 preset sharing and Discord integration",
+  "main": "worker.js",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^3.78.0"
+  }
+}
