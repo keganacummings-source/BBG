@@ -1,0 +1,119 @@
+name: Build BabyGirl VST3
+
+on:
+  push:
+    branches: [ main, master ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, name: Windows, artifact: BabyGirl-Windows-VST3 }
+          - { os: macos-latest,   name: macOS,   artifact: BabyGirl-macOS-VST3 }
+          - { os: ubuntu-latest,  name: Linux,   artifact: BabyGirl-Linux-VST3 }
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build zip \
+            libasound2-dev libjack-jackd2-dev ladspa-sdk \
+            libcurl4-openssl-dev libfreetype6-dev \
+            libx11-dev libxcomposite-dev libxcursor-dev \
+            libxext-dev libxinerama-dev libxrandr-dev libxrender-dev \
+            mesa-common-dev libglu1-mesa-dev
+
+      - name: Configure
+        run: >
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          -DJUCE_BUILD_EXTRAS=OFF -DJUCE_BUILD_EXAMPLES=OFF
+
+      # Fast gate: every machine x 3 sample rates x 6 parameter scenarios, synth, drums, LUFS.
+      - name: DSP self-test
+        run: |
+          cmake --build build --config Release --target bg_dsp_selftest
+          ctest --test-dir build -C Release --output-on-failure
+
+      - name: Build VST3 + Standalone
+        run: cmake --build build --config Release --parallel
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          foreach ($n in @("BabyGirl", "BabyGirlFX")) {
+            $v = Get-ChildItem -Path build -Recurse -Filter "$n.vst3" -Directory | Select-Object -First 1
+            if (-not $v) { throw "$n.vst3 was not produced" }
+            Copy-Item $v.FullName "dist/$n.vst3" -Recurse -Force
+            $e = Get-ChildItem -Path build -Recurse -Filter "$n.exe" -File | Select-Object -First 1
+            if ($e) { Copy-Item $e.FullName "dist/$n.exe" -Force }
+          }
+          Copy-Item README.md dist/README.md
+          Compress-Archive -Path dist/* -DestinationPath "${{ matrix.artifact }}.zip" -Force
+
+      - name: Package (macOS / Linux)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist
+          for n in BabyGirl BabyGirlFX; do
+            v=$(find build -name "$n.vst3" -type d | head -n 1)
+            test -n "$v" || { echo "$n.vst3 was not produced"; exit 1; }
+            cp -R "$v" "dist/$n.vst3"
+            if [ "$RUNNER_OS" = "macOS" ]; then
+              a=$(find build -name "$n.app" -type d | head -n 1); [ -n "$a" ] && cp -R "$a" dist/ || true
+            else
+              s=$(find build -type f -perm /111 -name "$n" | head -n 1); [ -n "$s" ] && cp "$s" dist/ || true
+            fi
+          done
+          cp README.md dist/README.md
+          (cd dist && zip -qry "../${{ matrix.artifact }}.zip" .)
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.zip
+          if-no-files-found: error
+
+  bundle:
+    name: One zip for all platforms
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: parts
+          merge-multiple: true
+      - name: Bundle
+        run: |
+          mkdir -p out && cd parts && ls -la
+          zip -qry ../out/BabyGirl-VST3-AllPlatforms.zip .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BabyGirl-VST3-AllPlatforms
+          path: out/BabyGirl-VST3-AllPlatforms.zip
+          if-no-files-found: error
+      - name: Attach to GitHub Release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            out/BabyGirl-VST3-AllPlatforms.zip
+            parts/*.zip
